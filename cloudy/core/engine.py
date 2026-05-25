@@ -3,7 +3,7 @@ import boto3
 from botocore.exceptions import ClientError
 
 from providers.aws.identity import get_identity
-from providers.aws.iam import enumerate_iam
+from providers.aws.iam import enumerate_iam, get_caller_permissions
 from providers.aws.ec2 import enumerate_ec2
 from providers.aws.s3 import enumerate_s3
 
@@ -44,9 +44,13 @@ class ScanEngine:
         if 'error' in identity:
             return {'identity': identity, 'error': identity['error']}
 
+        caller_permissions = get_caller_permissions(self.session, identity)
+        iam_data = enumerate_iam(self.session)
+
         return {
             'identity': identity,
-            'iam': enumerate_iam(self.session),
+            'caller_permissions': caller_permissions,
+            'iam': iam_data,
             'ec2': self._scan_regions(enumerate_ec2),
             's3': enumerate_s3(self.session),
         }

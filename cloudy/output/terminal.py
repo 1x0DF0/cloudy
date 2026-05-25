@@ -44,6 +44,18 @@ def print_summary(scan_data: dict) -> None:
         console.print(f"    [red]public:    {len(public)}[/red]")
 
 
+def print_privesc_paths(paths: list[dict]) -> None:
+    if not paths:
+        return
+    console.print(f'\n[bold red][*] privesc paths ({len(paths)})[/bold red]')
+    for p in paths:
+        color = 'red' if p['severity'] == 'CRIT' else 'yellow'
+        console.print(f"    [[{color}]{p['severity']}[/{color}]] [bold]{p['technique']}[/bold]")
+        console.print(f"        {p['finding'].replace('privesc: ', '')}")
+        console.print(f"        [dim]needs: {', '.join(p.get('permissions_needed', []))}[/dim]")
+        console.print(f"        [dim cyan]{p.get('exploit_cmd', '')}[/dim cyan]")
+
+
 def print_findings(findings: list[dict]) -> None:
     console.print(f"\n[bold][*] findings[/bold]")
     if not findings:
