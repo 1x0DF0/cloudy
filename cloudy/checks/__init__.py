@@ -1,6 +1,47 @@
 import networkx as nx
 
 
+def run_service_checks(scan_data: dict) -> list[dict]:
+    """Flat checks against raw scan data (SSM, Lambda, Secrets Manager)."""
+    findings = []
+
+    # SSM Parameter Store — accessible params with sensitive names
+    for region_data in scan_data.get('ssm', {}).values():
+        for p in region_data.get('parameters', []):
+            if p.get('accessible') and p.get('sensitive'):
+                findings.append({
+                    'severity': 'CRIT',
+                    'resource': f"ssm://{p['region']}/{p['name']}",
+                    'finding': f"plaintext credential in SSM ({p['type']}): {p['value_preview'][:60]}…"
+                    if p.get('value_preview') else f"sensitive SSM parameter accessible ({p['type']})",
+                })
+            elif p.get('accessible') and not p.get('sensitive'):
+                pass  # readable but not obviously a credential — skip noise
+
+    # Lambda — functions with flagged env var keys
+    for region_data in scan_data.get('lambda', {}).values():
+        for fn in region_data.get('functions', []):
+            for key in fn.get('flagged_keys', []):
+                val = fn['env_vars'].get(key, '')
+                findings.append({
+                    'severity': 'HIGH',
+                    'resource': fn['arn'],
+                    'finding': f"Lambda env var {key}={val[:60]}{'…' if len(val) > 60 else ''}",
+                })
+
+    # Secrets Manager — accessible secrets
+    for region_data in scan_data.get('secrets', {}).values():
+        for secret in region_data.get('secrets', []):
+            if secret.get('accessible'):
+                findings.append({
+                    'severity': 'CRIT',
+                    'resource': secret['arn'],
+                    'finding': f"Secrets Manager secret readable: {secret.get('value_preview', '')[:60]}",
+                })
+
+    return findings
+
+
 def run_all(graph: nx.DiGraph) -> list[dict]:
     findings = []
     findings.extend(_check_public_s3(graph))

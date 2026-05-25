@@ -6,11 +6,13 @@ _SEV_COLOR = {'CRIT': 'red', 'HIGH': 'red', 'MED': 'yellow', 'LOW': 'white'}
 _SEV_ORDER = ['CRIT', 'HIGH', 'MED', 'LOW']
 
 
-def print_identity(identity: dict) -> None:
+def print_identity(identity: dict, scp_applied: bool = False) -> None:
     console.print(f"\n[bold][*] identity[/bold]")
     console.print(f"    account:   {identity['account_id']}")
     console.print(f"    arn:       {identity['arn']}")
     console.print(f"    type:      {identity['type']}")
+    if scp_applied:
+        console.print(f"    [dim]scps:      applied (permissions intersected with org SCPs)[/dim]")
 
 
 def print_summary(scan_data: dict) -> None:
@@ -44,15 +46,23 @@ def print_summary(scan_data: dict) -> None:
         console.print(f"    [red]public:    {len(public)}[/red]")
 
 
-def print_privesc_paths(paths: list[dict]) -> None:
+def print_privesc_paths(paths: list[dict], conditioned: set[str] = None) -> None:
     if not paths:
         return
+    conditioned = conditioned or set()
     console.print(f'\n[bold red][*] privesc paths ({len(paths)})[/bold red]')
     for p in paths:
         color = 'red' if p['severity'] == 'CRIT' else 'yellow'
-        console.print(f"    [[{color}]{p['severity']}[/{color}]] [bold]{p['technique']}[/bold]")
+        needs = p.get('permissions_needed', [])
+        cond_flag = ''
+        if conditioned and any(
+            any(c in cond.lower() for c in conditioned)
+            for cond in [n.lower() for n in needs]
+        ):
+            cond_flag = ' [yellow][COND][/yellow]'
+        console.print(f"    [[{color}]{p['severity']}[/{color}]] [bold]{p['technique']}[/bold]{cond_flag}")
         console.print(f"        {p['finding'].replace('privesc: ', '')}")
-        console.print(f"        [dim]needs: {', '.join(p.get('permissions_needed', []))}[/dim]")
+        console.print(f"        [dim]needs: {', '.join(needs)}[/dim]")
         console.print(f"        [dim cyan]{p.get('exploit_cmd', '')}[/dim cyan]")
 
 

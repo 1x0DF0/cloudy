@@ -1,40 +1,38 @@
 """
-Cloudy → Claude Code automation.
+Cloudy → Claude Code integration.
 
 Flow:
-  1. Write findings + privesc paths to ~/.cloudy/findings.json
-  2. Paste an explicit prompt into Claude Code telling it to read that file
-     and write a structured JSON analysis to ~/.cloudy/response.json
-  3. Poll ~/.cloudy/response.json until it appears or timeout
+  1. Write all findings + privesc paths + permissions to ~/.cloudy/findings.json
+  2. Print a one-line prompt the user pastes into Claude Code
+  3. Claude Code reads the file, writes analysis to ~/.cloudy/response.json
+  4. Cloudy polls for the response file and renders it
+
+No pyautogui — window-focus targeting is fragile. One paste is faster and reliable.
 """
 
 import json
 import time
 from pathlib import Path
+from rich.console import Console
+from rich.panel import Panel
 
-try:
-    import pyperclip
-    import pyautogui
-except ImportError:
-    import sys
-    print('[!] pip install pyperclip pyautogui')
-    sys.exit(1)
+console = Console()
 
 CLOUDY_DIR = Path.home() / '.cloudy'
 FINDINGS_FILE = CLOUDY_DIR / 'findings.json'
 RESPONSE_FILE = CLOUDY_DIR / 'response.json'
 
-RESPONSE_SCHEMA = """{
+_RESPONSE_SCHEMA = """{
   "status": "success",
   "summary": "2-sentence risk summary",
-  "what_to_do": "top priority action",
+  "what_to_do": "highest-priority action",
   "paths": [
     {
       "technique": "...",
       "likelihood": "high|med|low",
       "stealth": "high|med|low",
       "cloudtrail_event": "iam:CreatePolicyVersion",
-      "detection_note": "what a defender sees",
+      "detection_note": "what a defender sees in CloudTrail",
       "remediation": "one-liner fix"
     }
   ],
@@ -47,27 +45,26 @@ def write_findings(findings: list[dict], privesc_paths: list[dict], scan_data: d
     CLOUDY_DIR.mkdir(exist_ok=True)
     payload = {
         'identity': scan_data.get('identity', {}),
-        'permissions': sorted(scan_data.get('caller_permissions', [])),
+        'scp_applied': scan_data.get('scp_applied', False),
+        'permissions': sorted(scan_data.get('caller_permissions', set()), key=str),
+        'conditioned_permissions': sorted(scan_data.get('caller_conditioned', set()), key=str),
         'findings': findings,
-        'privesc_paths': privesc_paths,
+        'privesc_paths': [
+            {k: v for k, v in p.items() if k != 'path'}  # strip nx path lists
+            for p in privesc_paths
+        ],
     }
     FINDINGS_FILE.write_text(json.dumps(payload, indent=2, default=str))
 
 
 def _build_prompt() -> str:
-    findings_path = str(FINDINGS_FILE)
-    response_path = str(RESPONSE_FILE)
     return (
-        f'Read the file at {findings_path}\n\n'
-        f'It contains AWS security scan data: caller identity, effective IAM permissions, '
-        f'misconfiguration findings, and privilege escalation paths with exploit commands.\n\n'
-        f'Analyze everything — cross-reference the raw permissions list against the privesc paths '
-        f'to find combinations that were not explicitly modeled. For each privesc path assess: '
-        f'likelihood it works (given the other permissions), stealth (which CloudTrail event fires), '
-        f'and one-liner remediation.\n\n'
-        f'Write your full analysis as JSON to {response_path} using the Write tool. Schema:\n'
-        f'{RESPONSE_SCHEMA}\n\n'
-        f'After writing the file confirm with: "cloudy analysis written"'
+        f'Read {FINDINGS_FILE} — it has AWS scan data: identity, effective IAM permissions '
+        f'(post-SCP + boundary), misconfiguration findings, and IAM privesc paths with exploit commands. '
+        f'Analyze everything. Cross-reference the raw permissions list for combinations not in the privesc paths. '
+        f'Flag any conditioned_permissions that look exploitable despite their conditions. '
+        f'Write your analysis as JSON to {RESPONSE_FILE} using the Write tool. '
+        f'Schema: {_RESPONSE_SCHEMA}'
     )
 
 
@@ -87,12 +84,14 @@ def send_to_claude_and_wait(
         RESPONSE_FILE.unlink()
 
     prompt = _build_prompt()
-    pyperclip.copy(prompt)
 
-    time.sleep(0.3)
-    pyautogui.hotkey('ctrl', 'v')
-    time.sleep(0.2)
-    pyautogui.press('enter')
+    console.print(Panel(
+        f'[bold]paste this into Claude Code:[/bold]\n\n[cyan]{prompt}[/cyan]',
+        title='[bold cyan]cloudy → claude[/bold cyan]',
+        border_style='cyan',
+        padding=(1, 2),
+    ))
+    console.print(f'[dim]waiting for {RESPONSE_FILE} (timeout: {timeout}s) ...[/dim]\n')
 
     start = time.time()
     while time.time() - start < timeout:

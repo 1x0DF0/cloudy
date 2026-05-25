@@ -2,9 +2,9 @@ from rich.console import Console
 
 from ui import get_scan_config
 from core.engine import ScanEngine
-from core.graph import build_graph
-from checks import run_all
-from checks.privesc import check_privesc
+from core.graph import build_graph, add_privesc_edges, find_privesc_paths
+from checks import run_all, run_service_checks
+from checks.privesc import check_privesc, paths_from_graph
 from output.terminal import print_identity, print_summary, print_findings, print_privesc_paths
 from output.json_export import export_json
 from providers.network.nmap import scan_hosts, findings_from_scans, is_nmap_installed
@@ -26,14 +26,27 @@ def run_aws(config: dict):
             console.print(f'[red][!] {err}[/red]')
         return None, None, None, None
 
-    print_identity(scan_data['identity'])
+    print_identity(scan_data['identity'], scp_applied=scan_data.get('scp_applied', False))
     print_summary(scan_data)
 
     graph = build_graph(scan_data)
-    findings = run_all(graph)
 
     permissions = scan_data.get('caller_permissions', set())
+    conditioned = scan_data.get('caller_conditioned', set())
+
+    # Flat privesc checks (single + multi-permission vectors)
     privesc_paths = check_privesc(permissions, scan_data)
+
+    # Graph-based multi-hop pathfinding
+    add_privesc_edges(graph, permissions, scan_data)
+    graph_paths = find_privesc_paths(graph, scan_data['identity']['arn'])
+    privesc_paths += paths_from_graph(graph_paths, graph)
+
+    findings = run_all(graph)
+    findings += run_service_checks(scan_data)
+
+    print_findings(findings)
+    print_privesc_paths(privesc_paths, conditioned)
 
     return scan_data, graph, findings, privesc_paths
 
@@ -73,23 +86,15 @@ def main():
         if targets:
             findings += run_network(targets)
 
-    print_findings(findings)
-    print_privesc_paths(privesc_paths)
-
     if config.get('out'):
         export_json(scan_data or {}, findings, graph, config['out'])
         console.print(f'\n[dim]→ {config["out"]}[/dim]')
 
     if config.get('analyze'):
-        account = (scan_data or {}).get('identity', {}).get('account_id', 'unknown')
-        console.print('\n[bold cyan][*] sending to Claude Code...[/bold cyan]')
-        console.print('[dim]    Claude Code must be open and focused[/dim]')
-
         response = send_to_claude_and_wait(
             findings=findings,
             privesc_paths=privesc_paths,
             scan_data=scan_data or {},
-            account=account,
         )
 
         if response.get('status') != 'timeout':
@@ -116,7 +121,7 @@ def main():
                     console.print(f'  → {step}')
         else:
             console.print('[red][!] timeout — no response from Claude Code[/red]')
-            console.print('[dim]    findings written to ~/.cloudy/findings.json[/dim]')
+            console.print(f'[dim]    findings written to {__import__("pathlib").Path.home() / ".cloudy" / "findings.json"}[/dim]')
 
 
 if __name__ == '__main__':

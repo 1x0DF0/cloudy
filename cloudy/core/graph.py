@@ -1,8 +1,17 @@
+import fnmatch
 import networkx as nx
 
 
 def _role_name_from_arn(arn: str) -> str:
     return arn.split('/')[-1]
+
+
+def _has(perms: set[str], action: str) -> bool:
+    a = action.lower()
+    for p in perms:
+        if p == '*' or fnmatch.fnmatch(a, p):
+            return True
+    return False
 
 
 def build_graph(scan_data: dict) -> nx.DiGraph:
@@ -43,15 +52,12 @@ def build_graph(scan_data: dict) -> nx.DiGraph:
     for region, region_data in scan_data.get('ec2', {}).items():
         if not isinstance(region_data, dict) or 'error' in region_data:
             continue
-
         for sg in region_data.get('security_groups', []):
             G.add_node(sg['GroupId'], type='security_group', name=sg.get('GroupName', ''),
                        region=region, vpc_id=sg.get('VpcId'),
                        ingress=sg.get('IpPermissions', []))
-
         for vpc in region_data.get('vpcs', []):
             G.add_node(vpc['VpcId'], type='vpc', region=region, cidr=vpc.get('CidrBlock'))
-
         for inst in region_data.get('instances', []):
             G.add_node(inst['id'], type='ec2', region=region,
                        public_ip=inst.get('public_ip'),
@@ -72,4 +78,113 @@ def build_graph(scan_data: dict) -> nx.DiGraph:
         G.add_node(f"s3://{bucket['name']}", type='s3', name=bucket['name'],
                    region=bucket.get('region'), is_public=bucket.get('is_public', False))
 
+    # Lambda nodes + role edges
+    for region_data in scan_data.get('lambda', {}).values():
+        for fn in region_data.get('functions', []):
+            G.add_node(fn['arn'], type='lambda', name=fn['name'],
+                       region=fn['region'], flagged_keys=fn.get('flagged_keys', []))
+            role_arn = fn.get('role')
+            if role_arn and G.has_node(role_arn):
+                G.add_edge(fn['arn'], role_arn, relationship='has_role')
+
     return G
+
+
+# ---------------------------------------------------------------------------
+# Privesc edge encoding — caller's permissions as directed graph edges
+# ---------------------------------------------------------------------------
+
+_HIGH_PRIV_POLICY_ARNS = {
+    'arn:aws:iam::aws:policy/AdministratorAccess',
+    'arn:aws:iam::aws:policy/PowerUserAccess',
+}
+
+
+def _admin_role_arns(G: nx.DiGraph) -> list[str]:
+    """Nodes that are IAM roles with AdministratorAccess or PowerUserAccess attached."""
+    return [
+        n for n, a in G.nodes(data=True)
+        if a.get('type') == 'iam_role' and a.get('high_priv')
+    ]
+
+
+def add_privesc_edges(G: nx.DiGraph, permissions: set[str], scan_data: dict):
+    """
+    Encode the caller's privesc-capable permissions as directed edges in the graph.
+    This enables nx.all_simple_paths to find multi-hop escalation chains.
+
+    Edges are labeled relationship='privesc:<technique>'.
+    Caller node must already exist in the graph.
+    """
+    caller_arn = scan_data.get('identity', {}).get('arn', '')
+    if not caller_arn or not G.has_node(caller_arn):
+        return
+
+    # Mark high-priv roles so path finder can target them
+    for role in scan_data.get('iam', {}).get('roles', []):
+        attached = {p.get('PolicyArn') for p in role.get('attached_policies', [])}
+        if attached & _HIGH_PRIV_POLICY_ARNS:
+            if G.has_node(role['Arn']):
+                G.nodes[role['Arn']]['high_priv'] = True
+
+    all_role_arns = [n for n, a in G.nodes(data=True) if a.get('type') == 'iam_role']
+
+    # AttachRolePolicy / PutRolePolicy: caller can attach admin policy to any role
+    if _has(permissions, 'iam:AttachRolePolicy') or _has(permissions, 'iam:PutRolePolicy'):
+        technique = 'AttachRolePolicy' if _has(permissions, 'iam:AttachRolePolicy') else 'PutRolePolicy'
+        for role_arn in all_role_arns:
+            if not G.has_edge(caller_arn, role_arn):
+                G.add_edge(caller_arn, role_arn,
+                           relationship=f'privesc:{technique}',
+                           requires=['iam:AttachRolePolicy or iam:PutRolePolicy', 'sts:AssumeRole'])
+
+    # UpdateAssumeRolePolicy: caller can modify trust on any role to allow self
+    if _has(permissions, 'iam:UpdateAssumeRolePolicy'):
+        for role_arn in all_role_arns:
+            if not G.has_edge(caller_arn, role_arn):
+                G.add_edge(caller_arn, role_arn,
+                           relationship='privesc:UpdateAssumeRolePolicy',
+                           requires=['iam:UpdateAssumeRolePolicy', 'sts:AssumeRole'])
+
+    # CreatePolicyVersion: caller can overwrite any customer-managed policy
+    if _has(permissions, 'iam:CreatePolicyVersion'):
+        account = scan_data.get('identity', {}).get('account_id', '')
+        for policy in scan_data.get('iam', {}).get('policies', []):
+            if policy.get('Arn', '').startswith(f'arn:aws:iam::{account}:policy/'):
+                # Policies aren't nodes yet — add the edge to all roles using them
+                # (simplified: edge from caller to any role as admin-policy vector)
+                for role_arn in all_role_arns:
+                    if not G.has_edge(caller_arn, role_arn):
+                        G.add_edge(caller_arn, role_arn,
+                                   relationship='privesc:CreatePolicyVersion',
+                                   requires=['iam:CreatePolicyVersion'])
+                break
+
+
+def find_privesc_paths(G: nx.DiGraph, caller_arn: str, cutoff: int = 4) -> list[list[str]]:
+    """
+    Return all simple paths from caller to any high-priv role, cutoff hops.
+    Each path is a list of node ARNs.
+    Only includes paths that traverse at least one privesc edge.
+    """
+    if not G.has_node(caller_arn):
+        return []
+
+    admin_nodes = _admin_role_arns(G)
+    paths = []
+    for target in admin_nodes:
+        if target == caller_arn:
+            continue
+        try:
+            for path in nx.all_simple_paths(G, caller_arn, target, cutoff=cutoff):
+                # Only include paths that use at least one privesc edge
+                has_privesc = any(
+                    G.edges[path[i], path[i + 1]].get('relationship', '').startswith('privesc:')
+                    for i in range(len(path) - 1)
+                )
+                if has_privesc:
+                    paths.append(path)
+        except nx.NetworkXError:
+            pass
+
+    return paths
