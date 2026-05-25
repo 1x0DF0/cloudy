@@ -2,3 +2,4 @@ boto3>=1.38.0
 typer
 rich
 networkx
+anthropic>=0.49.0
