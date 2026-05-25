@@ -39,16 +39,40 @@ def run_service_checks(scan_data: dict) -> list[dict]:
                     'finding': f"Secrets Manager secret readable: {secret.get('value_preview', '')[:60]}",
                 })
 
+    # CloudFormation — sensitive stack outputs
+    for region_data in scan_data.get('cloudformation', {}).values():
+        for stack in region_data.get('stacks', []):
+            for out in stack.get('outputs', []):
+                if out.get('sensitive'):
+                    findings.append({
+                        'severity': 'HIGH',
+                        'resource': f"cfn://{stack['region']}/{stack['name']}",
+                        'finding': f"stack output {out['key']} = {out['value'][:80]}",
+                    })
+
+    # RDS — publicly accessible instances
+    for region_data in scan_data.get('rds', {}).values():
+        for inst in region_data.get('instances', []):
+            if inst.get('publicly_accessible'):
+                findings.append({
+                    'severity': 'HIGH',
+                    'resource': f"rds://{inst['region']}/{inst['id']}",
+                    'finding': f"{inst['engine']} publicly accessible at {inst['endpoint']}",
+                })
+
     return findings
 
 
-def run_all(graph: nx.DiGraph) -> list[dict]:
+def run_all(graph: nx.DiGraph, scan_data: dict = None) -> list[dict]:
     findings = []
     findings.extend(_check_public_s3(graph))
     findings.extend(_check_open_security_groups(graph))
     findings.extend(_check_iam_no_mfa(graph))
     findings.extend(_check_wildcard_trust(graph))
     findings.extend(_check_role_chains(graph))
+    findings.extend(_check_cross_account_trust(graph))
+    if scan_data:
+        findings.extend(_check_rds_public_snapshots(scan_data))
     return findings
 
 
@@ -114,5 +138,36 @@ def _check_role_chains(graph: nx.DiGraph) -> list[dict]:
                 'severity': 'MED',
                 'resource': role,
                 'finding': f'role chain: reaches {len(reachable)} role(s) via AssumeRole',
+            })
+    return findings
+
+
+def _check_cross_account_trust(graph: nx.DiGraph) -> list[dict]:
+    findings = []
+    for node, attrs in graph.nodes(data=True):
+        if attrs.get('type') == 'iam_role' and attrs.get('cross_account_trust'):
+            external = [
+                pred for pred in graph.predecessors(node)
+                if graph.nodes[pred].get('type') == 'external_principal'
+            ]
+            for ext in external:
+                findings.append({
+                    'severity': 'HIGH',
+                    'resource': node,
+                    'finding': f'cross-account trust: {ext} can assume this role',
+                })
+    return findings
+
+
+def _check_rds_public_snapshots(scan_data: dict) -> list[dict]:
+    findings = []
+    for region_data in scan_data.get('rds', {}).values():
+        if not isinstance(region_data, dict):
+            continue
+        for snap in region_data.get('public_snapshots', []):
+            findings.append({
+                'severity': 'CRIT',
+                'resource': snap.get('arn', snap.get('id', '')),
+                'finding': f"RDS snapshot publicly accessible: {snap['id']} ({snap['engine']}, {snap['size_gb']}GB)",
             })
     return findings

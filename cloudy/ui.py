@@ -49,11 +49,15 @@ def ask_aws_options() -> dict:
     profile = Prompt.ask('  aws profile', default='default')
     profile = None if profile == 'default' else profile
 
+    attempt_escalation = Confirm.ask('  attempt sts:AssumeRole on reachable roles', default=True)
     analyze = Confirm.ask('  send findings to claude code for analysis', default=False)
     out = Prompt.ask('  save json output to file (leave blank to skip)', default='')
     out = out.strip() or None
+    html_out = Prompt.ask('  save html report to file (leave blank to skip)', default='')
+    html_out = html_out.strip() or None
 
-    return {'profile': profile, 'analyze': analyze, 'out': out}
+    return {'profile': profile, 'attempt_escalation': attempt_escalation,
+            'analyze': analyze, 'out': out, 'html_out': html_out}
 
 
 def ask_network_options() -> dict:
@@ -82,11 +86,16 @@ def ask_full_options() -> dict:
     extra_hosts = Prompt.ask('  additional hosts to scan (leave blank to skip)', default='')
     hosts = [h.strip() for h in extra_hosts.split(',') if h.strip()]
 
+    attempt_escalation = Confirm.ask('  attempt sts:AssumeRole on reachable roles', default=True)
     analyze = Confirm.ask('  send findings to claude code for analysis', default=False)
     out = Prompt.ask('  save json output to file (leave blank to skip)', default='')
     out = out.strip() or None
+    html_out = Prompt.ask('  save html report to file (leave blank to skip)', default='')
+    html_out = html_out.strip() or None
 
-    return {'profile': profile, 'scan_ec2': scan_ec2, 'hosts': hosts, 'analyze': analyze, 'out': out}
+    return {'profile': profile, 'scan_ec2': scan_ec2, 'hosts': hosts,
+            'attempt_escalation': attempt_escalation,
+            'analyze': analyze, 'out': out, 'html_out': html_out}
 
 
 def get_scan_config() -> dict | None:

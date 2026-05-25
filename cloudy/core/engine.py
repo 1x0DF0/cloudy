@@ -9,6 +9,8 @@ from providers.aws.s3 import enumerate_s3
 from providers.aws.ssm import enumerate_ssm
 from providers.aws.lambda_ import enumerate_lambda
 from providers.aws.secretsmanager import enumerate_secrets
+from providers.aws.cloudformation import enumerate_cloudformation
+from providers.aws.rds import enumerate_rds
 from providers.aws.organizations import get_scp_restrictions, apply_scps
 
 
@@ -49,12 +51,9 @@ class ScanEngine:
             return {'identity': identity, 'error': identity['error']}
 
         caller_perms, caller_conditioned = get_caller_permissions(self.session, identity)
-
-        # SCP intersection — None if standalone account or no orgs read perms
         scps = get_scp_restrictions(self.session, identity.get('account_id', ''))
         effective_perms = apply_scps(caller_perms, scps)
         effective_conditioned = apply_scps(caller_conditioned, scps)
-
         iam_data = enumerate_iam(self.session)
 
         return {
@@ -68,4 +67,6 @@ class ScanEngine:
             'ssm': self._scan_regions(enumerate_ssm),
             'lambda': self._scan_regions(enumerate_lambda),
             'secrets': self._scan_regions(enumerate_secrets),
+            'cloudformation': self._scan_regions(enumerate_cloudformation),
+            'rds': self._scan_regions(enumerate_rds),
         }

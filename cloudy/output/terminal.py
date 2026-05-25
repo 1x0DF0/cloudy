@@ -45,6 +45,38 @@ def print_summary(scan_data: dict) -> None:
     if public:
         console.print(f"    [red]public:    {len(public)}[/red]")
 
+    lambda_count = sum(
+        len(r.get('functions', [])) for r in scan_data.get('lambda', {}).values() if isinstance(r, dict)
+    )
+    ssm_count = sum(
+        len(r.get('parameters', [])) for r in scan_data.get('ssm', {}).values() if isinstance(r, dict)
+    )
+    secrets_count = sum(
+        len(r.get('secrets', [])) for r in scan_data.get('secrets', {}).values() if isinstance(r, dict)
+    )
+    cfn_count = sum(
+        len(r.get('stacks', [])) for r in scan_data.get('cloudformation', {}).values() if isinstance(r, dict)
+    )
+    rds_public = sum(
+        len(r.get('public_snapshots', [])) for r in scan_data.get('rds', {}).values() if isinstance(r, dict)
+    )
+
+    if lambda_count:
+        console.print(f"\n[bold][*] lambda[/bold]")
+        console.print(f"    functions: {lambda_count}")
+    if ssm_count:
+        console.print(f"\n[bold][*] ssm[/bold]")
+        console.print(f"    parameters: {ssm_count}")
+    if secrets_count:
+        console.print(f"\n[bold][*] secrets manager[/bold]")
+        console.print(f"    secrets:   {secrets_count}")
+    if cfn_count:
+        console.print(f"\n[bold][*] cloudformation[/bold]")
+        console.print(f"    stacks:    {cfn_count}")
+    if rds_public:
+        console.print(f"\n[bold][*] rds[/bold]")
+        console.print(f"    [red]public snapshots: {rds_public}[/red]")
+
 
 def print_privesc_paths(paths: list[dict], conditioned: set[str] = None) -> None:
     if not paths:
@@ -64,6 +96,20 @@ def print_privesc_paths(paths: list[dict], conditioned: set[str] = None) -> None
         console.print(f"        {p['finding'].replace('privesc: ', '')}")
         console.print(f"        [dim]needs: {', '.join(needs)}[/dim]")
         console.print(f"        [dim cyan]{p.get('exploit_cmd', '')}[/dim cyan]")
+
+
+def print_escalation_results(results: list[dict]) -> None:
+    if not results:
+        return
+    console.print(f'\n[bold magenta][*] role assumption succeeded ({len(results)})[/bold magenta]')
+    for r in results:
+        chain = ' → '.join(a.split('/')[-1] for a in r['chain'])
+        console.print(f'    [magenta]✓[/magenta] {chain}')
+        console.print(f'        permissions: {r["permissions_count"]}')
+        if r['privesc_paths']:
+            console.print(f'        [red]privesc from here: {len(r["privesc_paths"])}[/red]')
+            for p in r['privesc_paths'][:3]:
+                console.print(f'            [{p["severity"]}] {p["technique"]}')
 
 
 def print_findings(findings: list[dict]) -> None:

@@ -3,10 +3,15 @@ from rich.console import Console
 from ui import get_scan_config
 from core.engine import ScanEngine
 from core.graph import build_graph, add_privesc_edges, find_privesc_paths
+from core.escalation import try_assume_roles
 from checks import run_all, run_service_checks
 from checks.privesc import check_privesc, paths_from_graph
-from output.terminal import print_identity, print_summary, print_findings, print_privesc_paths
+from output.terminal import (
+    print_identity, print_summary, print_findings,
+    print_privesc_paths, print_escalation_results,
+)
 from output.json_export import export_json
+from output.html_export import export_html
 from providers.network.nmap import scan_hosts, findings_from_scans, is_nmap_installed
 from ai.autopaste import send_to_claude_and_wait
 
@@ -24,7 +29,7 @@ def run_aws(config: dict):
             console.print('[dim]    aws configure  — set up credentials[/dim]')
         else:
             console.print(f'[red][!] {err}[/red]')
-        return None, None, None, None
+        return None, None, None, None, None
 
     print_identity(scan_data['identity'], scp_applied=scan_data.get('scp_applied', False))
     print_summary(scan_data)
@@ -34,21 +39,27 @@ def run_aws(config: dict):
     permissions = scan_data.get('caller_permissions', set())
     conditioned = scan_data.get('caller_conditioned', set())
 
-    # Flat privesc checks (single + multi-permission vectors)
     privesc_paths = check_privesc(permissions, scan_data)
-
-    # Graph-based multi-hop pathfinding
     add_privesc_edges(graph, permissions, scan_data)
     graph_paths = find_privesc_paths(graph, scan_data['identity']['arn'])
     privesc_paths += paths_from_graph(graph_paths, graph)
 
-    findings = run_all(graph)
+    findings = run_all(graph, scan_data)
     findings += run_service_checks(scan_data)
+
+    # Role assumption — try each reachable role, rescan from there
+    escalation_results = []
+    if config.get('attempt_escalation', True):
+        console.print('\n[dim][*] attempting role assumptions...[/dim]')
+        escalation_results = try_assume_roles(
+            engine.session, scan_data['identity'], scan_data
+        )
 
     print_findings(findings)
     print_privesc_paths(privesc_paths, conditioned)
+    print_escalation_results(escalation_results)
 
-    return scan_data, graph, findings, privesc_paths
+    return scan_data, graph, findings, privesc_paths, escalation_results
 
 
 def run_network(targets: list[str]) -> list[dict]:
@@ -66,14 +77,15 @@ def main():
         return
 
     mode = config['mode']
-    scan_data, graph, findings, privesc_paths = None, None, [], []
+    scan_data, graph, findings, privesc_paths, escalation_results = None, None, [], [], []
 
     if mode in ('aws', 'full'):
-        scan_data, graph, findings, privesc_paths = run_aws(config)
+        scan_data, graph, findings, privesc_paths, escalation_results = run_aws(config)
         if scan_data is None:
             return
         findings = findings or []
         privesc_paths = privesc_paths or []
+        escalation_results = escalation_results or []
 
     if mode in ('network', 'full'):
         targets = list(config.get('hosts') or [])
@@ -88,7 +100,18 @@ def main():
 
     if config.get('out'):
         export_json(scan_data or {}, findings, graph, config['out'])
-        console.print(f'\n[dim]→ {config["out"]}[/dim]')
+        console.print(f'\n[dim]→ json: {config["out"]}[/dim]')
+
+    if config.get('html_out'):
+        try:
+            export_html(
+                scan_data or {}, findings, privesc_paths,
+                escalation_results, graph or __import__('networkx').DiGraph(),
+                config['html_out'],
+            )
+            console.print(f'[dim]→ html: {config["html_out"]}[/dim]')
+        except ImportError:
+            console.print('[yellow][!] jinja2 not installed — skipping html report (pip install jinja2)[/yellow]')
 
     if config.get('analyze'):
         response = send_to_claude_and_wait(
@@ -121,7 +144,7 @@ def main():
                     console.print(f'  → {step}')
         else:
             console.print('[red][!] timeout — no response from Claude Code[/red]')
-            console.print(f'[dim]    findings written to {__import__("pathlib").Path.home() / ".cloudy" / "findings.json"}[/dim]')
+            console.print(f'[dim]    findings written to ~/.cloudy/findings.json[/dim]')
 
 
 if __name__ == '__main__':

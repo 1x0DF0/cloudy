@@ -3,3 +3,4 @@ rich
 networkx
 pyperclip
 pyautogui
+jinja2

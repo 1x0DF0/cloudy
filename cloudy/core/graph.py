@@ -6,6 +6,21 @@ def _role_name_from_arn(arn: str) -> str:
     return arn.split('/')[-1]
 
 
+def _add_trust_edge(G: nx.DiGraph, principal_arn: str, role_arn: str, account_id: str):
+    """Add a can_assume edge, flagging cross-account principals."""
+    cross = bool(account_id) and (
+        f':{account_id}:' not in principal_arn and
+        not principal_arn.startswith('arn:aws:iam::')  # service principals
+    )
+    if not G.has_node(principal_arn):
+        G.add_node(principal_arn,
+                   type='external_principal' if cross else 'unknown',
+                   cross_account=cross)
+    G.add_edge(principal_arn, role_arn, relationship='can_assume', cross_account=cross)
+    if cross and G.has_node(role_arn):
+        G.nodes[role_arn]['cross_account_trust'] = True
+
+
 def _has(perms: set[str], action: str) -> bool:
     a = action.lower()
     for p in perms:
@@ -16,13 +31,15 @@ def _has(perms: set[str], action: str) -> bool:
 
 def build_graph(scan_data: dict) -> nx.DiGraph:
     G = nx.DiGraph()
+    account_id = scan_data.get('identity', {}).get('account_id', '')
 
     for user in scan_data.get('iam', {}).get('users', []):
         G.add_node(user['Arn'], type='iam_user', name=user['UserName'],
                    has_mfa=user.get('has_mfa'))
 
     for role in scan_data.get('iam', {}).get('roles', []):
-        G.add_node(role['Arn'], type='iam_role', name=role['RoleName'], wildcard_trust=False)
+        G.add_node(role['Arn'], type='iam_role', name=role['RoleName'],
+                   wildcard_trust=False, cross_account_trust=False)
         trust = role.get('AssumeRolePolicyDocument', {})
         for stmt in trust.get('Statement', []):
             if stmt.get('Effect') != 'Allow':
@@ -32,7 +49,7 @@ def build_graph(scan_data: dict) -> nx.DiGraph:
                 if principal == '*':
                     G.nodes[role['Arn']]['wildcard_trust'] = True
                 else:
-                    G.add_edge(principal, role['Arn'], relationship='can_assume')
+                    _add_trust_edge(G, principal, role['Arn'], account_id)
                 continue
             if isinstance(principal, dict):
                 aws = principal.get('AWS', [])
@@ -41,7 +58,7 @@ def build_graph(scan_data: dict) -> nx.DiGraph:
                     if arn == '*':
                         G.nodes[role['Arn']]['wildcard_trust'] = True
                     elif arn:
-                        G.add_edge(arn, role['Arn'], relationship='can_assume')
+                        _add_trust_edge(G, arn, role['Arn'], account_id)
 
     role_by_name = {
         attrs['name']: node
