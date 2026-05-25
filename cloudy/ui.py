@@ -30,7 +30,7 @@ def menu(title: str, options: list[tuple[str, str]]) -> str:
     table.add_column(style='dim')
 
     for key, label, description in options:
-        table.add_row(f'[{key}]', label, description)
+        table.add_row(f'[[{key}]]', label, description)
 
     console.print(Panel(table, title=f'[bold]{title}[/bold]', border_style='cyan', padding=(1, 2)))
 
