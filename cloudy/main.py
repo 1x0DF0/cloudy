@@ -14,6 +14,7 @@ from output.json_export import export_json
 from output.html_export import export_html
 from providers.network.nmap import scan_hosts, findings_from_scans, is_nmap_installed
 from ai.autopaste import send_to_claude_and_wait
+from ai.chat import chat_loop
 
 console = Console()
 
@@ -77,6 +78,11 @@ def main():
         return
 
     mode = config['mode']
+
+    if mode == 'chat':
+        chat_loop()
+        return
+
     scan_data, graph, findings, privesc_paths, escalation_results = None, None, [], [], []
 
     if mode in ('aws', 'full'):

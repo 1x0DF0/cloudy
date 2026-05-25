@@ -103,10 +103,11 @@ def get_scan_config() -> dict | None:
     print_banner()
 
     choice = menu('select scan type', [
-        ('1', 'aws',           'enumerate iam, ec2, s3 across all regions'),
-        ('2', 'network',       'port scan target hosts (requires nmap)'),
-        ('3', 'full',          'aws + network — complete recon'),
-        ('q', 'quit',          ''),
+        ('1', 'aws',     'enumerate iam, ec2, s3 across all regions'),
+        ('2', 'network', 'port scan target hosts (requires nmap)'),
+        ('3', 'full',    'aws + network — complete recon'),
+        ('4', 'chat',    'ask claude about the last scan'),
+        ('q', 'quit',    ''),
     ])
 
     if choice == 'q':
@@ -117,3 +118,5 @@ def get_scan_config() -> dict | None:
         return {'mode': 'network', **ask_network_options()}
     if choice == '3':
         return {'mode': 'full', **ask_full_options()}
+    if choice == '4':
+        return {'mode': 'chat'}
